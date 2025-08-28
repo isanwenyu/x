@@ -1,268 +1,129 @@
-"""
-Twitter/X tweet monitoring module using Nitter mirrors
-"""
-
-import requests
-import time
-import re
 import logging
-from typing import List, Dict, Optional, Tuple
+import re
+import time
+from typing import List, Optional, Tuple
+import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-import random
+from datetime import datetime
 
-from .logging_config import get_logger
+from .state import read_last_tweet_id, write_last_tweet_id
+from .proxy_config import get_proxy_config
 
-
-class Tweet:
-    """Represents a Twitter/X tweet"""
-    
-    def __init__(self, tweet_id: str, username: str, content: str, 
-                 timestamp: str, url: str, media_urls: List[str] = None):
-        self.tweet_id = tweet_id
-        self.username = username
-        self.content = content
-        self.timestamp = timestamp
-        self.url = url
-        self.media_urls = media_urls or []
-    
-    def __repr__(self):
-        return f"Tweet(id={self.tweet_id}, user={self.username}, content={self.content[:50]}...)"
-    
-    def to_dict(self) -> Dict:
-        """Convert tweet to dictionary"""
-        return {
-            'tweet_id': self.tweet_id,
-            'username': self.username,
-            'content': self.content,
-            'timestamp': self.timestamp,
-            'url': self.url,
-            'media_urls': self.media_urls
-        }
-
+# 浏览器User-Agent，避免被屏蔽
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 class TwitterMonitor:
-    """Monitor Twitter/X tweets using Nitter mirrors"""
+    """Twitter/X监控器，用于监控指定用户的推文"""
     
-    def __init__(self, username: str, nitter_urls: List[str], 
-                 request_timeout: int = 30, max_retries: int = 3, retry_delay: int = 5):
+    def __init__(self, username: str, nitter_instance: str = "https://nitter.net"):
+        """
+        初始化Twitter监控器
+        
+        Args:
+            username: 要监控的Twitter用户名（不包含@符号）
+            nitter_instance: Nitter实例URL，默认为nitter.net
+        """
         self.username = username
-        self.nitter_urls = nitter_urls
-        self.request_timeout = request_timeout
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.logger = get_logger(__name__)
-        
-    def _get_session(self) -> requests.Session:
-        """Create a requests session with proper headers"""
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        })
-        return session
+        self.nitter_instance = nitter_instance.rstrip('/')
+        self.logger = logging.getLogger(__name__)
     
-    def _make_request(self, url: str) -> Optional[requests.Response]:
-        """Make HTTP request with retry logic"""
-        session = self._get_session()
+    def fetch_latest_ids(self, timeout: int = 30) -> List[str]:
+        """
+        获取最新的推文ID列表
         
-        for attempt in range(self.max_retries):
-            try:
-                self.logger.debug(f"Attempting request to {url} (attempt {attempt + 1})")
-                response = session.get(url, timeout=self.request_timeout)
-                response.raise_for_status()
-                return response
-                
-            except requests.exceptions.RequestException as e:
-                self.logger.warning(f"Request failed (attempt {attempt + 1}): {e}")
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
-                else:
-                    self.logger.error(f"All retry attempts failed for {url}")
-                    return None
-    
-    def _parse_tweet(self, tweet_element, base_url: str) -> Optional[Tweet]:
-        """Parse a tweet element into Tweet object"""
+        Args:
+            timeout: 请求超时时间（秒）
+            
+        Returns:
+            推文ID列表，按时间倒序排列（最新的在前）
+        """
+        url = f"{self.nitter_instance}/{self.username}"
+        tweet_ids = []
+        
         try:
-            # Extract tweet ID from URL
-            tweet_link = tweet_element.find('a', href=re.compile(r'/status/'))
-            if not tweet_link:
-                return None
+            # 获取代理配置
+            proxies = get_proxy_config()
+            if proxies:
+                logging.debug("Using proxies: %s", proxies)
             
-            tweet_url = urljoin(base_url, tweet_link['href'])
-            tweet_id = tweet_url.split('/')[-1]
-            
-            # Extract content
-            content_div = tweet_element.find('div', class_='tweet-content')
-            if not content_div:
-                return None
-            
-            content = content_div.get_text(strip=True)
-            
-            # Extract timestamp
-            time_element = tweet_element.find('time')
-            if time_element and time_element.get('datetime'):
-                timestamp = time_element['datetime']
-            else:
-                timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-            
-            # Extract media URLs
-            media_urls = []
-            media_elements = tweet_element.find_all('div', class_='tweet-media')
-            for media in media_elements:
-                img_tags = media.find_all('img')
-                for img in img_tags:
-                    if img.get('src'):
-                        media_urls.append(urljoin(base_url, img['src']))
-            
-            return Tweet(
-                tweet_id=tweet_id,
-                username=self.username,
-                content=content,
-                timestamp=timestamp,
-                url=tweet_url,
-                media_urls=media_urls
+            # 发送请求
+            response = requests.get(
+                url, 
+                headers={"User-Agent": USER_AGENT},
+                timeout=timeout,
+                proxies=proxies
             )
+            response.raise_for_status()
             
-        except Exception as e:
-            self.logger.error(f"Error parsing tweet: {e}")
-            return None
-    
-    def _get_tweets_from_nitter(self, nitter_url: str, max_tweets: int = 10) -> List[Tweet]:
-        """Get tweets from a specific Nitter instance"""
-        # Construct URL for user timeline
-        user_url = f"{nitter_url.rstrip('/')}/{self.username}"
-        
-        response = self._make_request(user_url)
-        if not response:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 查找推文元素
+            tweets = soup.find_all('div', class_='timeline-item')
+            
+            for tweet in tweets:
+                # 查找推文链接
+                link = tweet.find('a', href=re.compile(r'/status/'))
+                if link and link.get('href'):
+                    # 从链接中提取推文ID
+                    match = re.search(r'/status/(\d+)', link['href'])
+                    if match:
+                        tweet_ids.append(match.group(1))
+            
+            self.logger.info(f"成功获取 {len(tweet_ids)} 条推文ID")
+            return tweet_ids
+            
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"请求失败: {e}")
             return []
-        
-        try:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Find tweet containers
-            tweet_elements = soup.find_all('div', class_='timeline-item')
-            if not tweet_elements:
-                # Try alternative selectors
-                tweet_elements = soup.find_all('div', class_='tweet')
-            
-            tweets = []
-            for tweet_element in tweet_elements[:max_tweets]:
-                tweet = self._parse_tweet(tweet_element, nitter_url)
-                if tweet:
-                    tweets.append(tweet)
-            
-            self.logger.info(f"Found {len(tweets)} tweets from {nitter_url}")
-            return tweets
-            
         except Exception as e:
-            self.logger.error(f"Error parsing tweets from {nitter_url}: {e}")
+            self.logger.error(f"解析推文ID时出错: {e}")
             return []
     
-    def get_latest_tweets(self, max_tweets: int = 10) -> List[Tweet]:
-        """Get latest tweets from available Nitter instances"""
-        all_tweets = []
+    def get_new_tweets(self, since_id: Optional[str] = None) -> List[str]:
+        """
+        获取新的推文ID
         
-        # Shuffle Nitter URLs to distribute load
-        urls = self.nitter_urls.copy()
-        random.shuffle(urls)
-        
-        for nitter_url in urls:
-            try:
-                tweets = self._get_tweets_from_nitter(nitter_url, max_tweets)
-                if tweets:
-                    # Add source URL for debugging
-                    for tweet in tweets:
-                        tweet.nitter_source = nitter_url
-                    
-                    all_tweets.extend(tweets)
-                    self.logger.info(f"Successfully retrieved tweets from {nitter_url}")
-                    break  # Use first successful source
-                    
-            except Exception as e:
-                self.logger.warning(f"Failed to get tweets from {nitter_url}: {e}")
-                continue
+        Args:
+            since_id: 从这个ID之后的推文开始获取，如果为None则获取所有推文
+            
+        Returns:
+            新的推文ID列表
+        """
+        all_tweets = self.fetch_latest_ids()
         
         if not all_tweets:
-            self.logger.error("Failed to retrieve tweets from all Nitter instances")
+            return []
         
-        # Remove duplicates based on tweet ID
-        seen_ids = set()
-        unique_tweets = []
-        for tweet in all_tweets:
-            if tweet.tweet_id not in seen_ids:
-                seen_ids.add(tweet.tweet_id)
-                unique_tweets.append(tweet)
+        if since_id is None:
+            return all_tweets
         
-        # Sort by tweet ID (newest first)
-        unique_tweets.sort(key=lambda x: x.tweet_id, reverse=True)
+        new_tweets = []
+        for tweet_id in all_tweets:
+            if tweet_id == since_id:
+                break
+            new_tweets.append(tweet_id)
         
-        return unique_tweets[:max_tweets]
+        return new_tweets
     
-    def get_tweet_by_id(self, tweet_id: str) -> Optional[Tweet]:
-        """Get a specific tweet by ID"""
-        tweets = self.get_latest_tweets(max_tweets=50)
-        for tweet in tweets:
-            if tweet.tweet_id == tweet_id:
-                return tweet
-        return None
-    
-    def test_connection(self) -> Tuple[bool, str]:
-        """Test connection to Nitter instances"""
-        working_urls = []
+    def monitor_once(self) -> List[str]:
+        """
+        执行一次监控检查
         
-        for nitter_url in self.nitter_urls:
-            try:
-                test_url = f"{nitter_url.rstrip('/')}/{self.username}"
-                response = self._make_request(test_url)
-                if response and response.status_code == 200:
-                    working_urls.append(nitter_url)
-                    
-            except Exception as e:
-                self.logger.warning(f"Connection test failed for {nitter_url}: {e}")
-                continue
+        Returns:
+            新发现的推文ID列表
+        """
+        last_id = read_last_tweet_id(self.username)
+        new_tweets = self.get_new_tweets(last_id)
         
-        if working_urls:
-            return True, f"Working Nitter URLs: {', '.join(working_urls)}"
+        if new_tweets:
+            # 更新最后一条推文ID
+            write_last_tweet_id(self.username, new_tweets[0])
+            self.logger.info(f"发现 {len(new_tweets)} 条新推文")
         else:
-            return False, "No working Nitter URLs found"
-
-
-def test_twitter_monitor():
-    """Test function for TwitterMonitor"""
-    import os
-    
-    # Use test configuration
-    username = "elonmusk"
-    nitter_urls = [
-        "https://nitter.poast.org",
-        "https://nitter.privacydev.net",
-        "https://nitter.cz"
-    ]
-    
-    monitor = TwitterMonitor(username, nitter_urls)
-    
-    print("Testing Twitter Monitor...")
-    
-    # Test connection
-    success, message = monitor.test_connection()
-    print(f"Connection test: {'✓' if success else '✗'} - {message}")
-    
-    if success:
-        print("\nFetching latest tweets...")
-        tweets = monitor.get_latest_tweets(max_tweets=3)
+            self.logger.debug("没有发现新推文")
         
-        if tweets:
-            print(f"Found {len(tweets)} tweets:")
-            for tweet in tweets:
-                print(f"- {tweet.tweet_id}: {tweet.content[:100]}...")
-        else:
-            print("No tweets found")
+        return new_tweets
 
-
-if __name__ == "__main__":
-    test_twitter_monitor()
+    def get_tweet_url(self, tweet_id: str) -> str:
+        """获取推文URL"""
+        return f"https://twitter.com/{self.username}/status/{tweet_id}"

@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "functions": {
+    "vercel_api.py": {
+      "runtime": "python3.9"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/vercel_api.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/README.md"
+    }
+  ],
+  "env": {
+    "DINGTALK_WEBHOOK": "@dingtalk_webhook",
+    "DINGTALK_SECRET": "@dingtalk_secret",
+    "TWITTER_USERNAME": "@twitter_username",
+    "NITTER_INSTANCE": "@nitter_instance",
+    "XTRACKER_USERNAME": "@xtracker_username",
+    "XTRACKER_API_URL": "@xtracker_api_url",
+    "LOG_LEVEL": "INFO",
+    "HTTP_PROXY": "@http_proxy",
+    "HTTPS_PROXY": "@https_proxy"
+  }
+}
