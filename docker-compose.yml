@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  x-monitor:
+    build: .
+    container_name: x-tweet-monitor
+    restart: unless-stopped
+    
+    # 环境变量
+    environment:
+      - DINGTALK_ACCESS_TOKEN=${DINGTALK_ACCESS_TOKEN}
+      - DINGTALK_SECRET=${DINGTALK_SECRET}
+      - TWITTER_USERS=${TWITTER_USERS:-elonmusk}
+      - XTRACKER_API_URL=${XTRACKER_API_URL:-https://www.xtracker.io/api/users?stats=true&platform=X}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-10}
+      - XTRACKER_STATS_INTERVAL=${XTRACKER_STATS_INTERVAL:-60}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    
+    # 卷挂载
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import main; service = main.XMonitorService(); print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 可选：监控服务
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=3600  # 每小时检查一次更新
+    command: x-tweet-monitor
+
+networks:
+  default:
+    name: x-monitor-network
